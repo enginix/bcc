@@ -25,6 +25,10 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <errno.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <linux/un.h>
 #include <linux/types.h>
 #include <linux/perf_event.h>
 
@@ -35,20 +39,6 @@ enum {
   RB_NOT_USED = 0, // ring buffer not usd
   RB_USED_IN_MUNMAP = 1, // used in munmap
   RB_USED_IN_READ = 2, // used in read
-};
-
-struct perf_reader {
-  perf_reader_raw_cb raw_cb;
-  perf_reader_lost_cb lost_cb;
-  void *cb_cookie; // to be returned in the cb
-  void *buf; // for keeping segmented data
-  size_t buf_size;
-  void *base;
-  int rb_use_state;
-  pid_t rb_read_tid;
-  int page_size;
-  int page_cnt;
-  int fd;
 };
 
 struct perf_reader * perf_reader_new(perf_reader_raw_cb raw_cb,
@@ -63,6 +53,8 @@ struct perf_reader * perf_reader_new(perf_reader_raw_cb raw_cb,
   reader->fd = -1;
   reader->page_size = getpagesize();
   reader->page_cnt = page_cnt;
+  reader->regs_cnt = 0;
+  reader->have_stack = false;
   return reader;
 }
 
@@ -114,9 +106,57 @@ struct perf_sample_trace_kprobe {
   uint64_t ip;
 };
 
+#if 0
+void DumpHex(const void* data, size_t size) {
+	char ascii[17];
+	size_t i, j;
+	ascii[16] = '\0';
+	for (i = 0; i < size; ++i) {
+		printf("%02X ", ((unsigned char*)data)[i]);
+		if (((unsigned char*)data)[i] >= ' ' && ((unsigned char*)data)[i] <= '~') {
+			ascii[i % 16] = ((unsigned char*)data)[i];
+		} else {
+			ascii[i % 16] = '.';
+		}
+		if ((i+1) % 8 == 0 || i+1 == size) {
+			printf(" ");
+			if ((i+1) % 16 == 0) {
+				printf("|  %s \n", ascii);
+			} else if (i+1 == size) {
+				ascii[(i+1) % 16] = '\0';
+				if ((i+1) % 16 <= 8) {
+					printf(" ");
+				}
+				for (j = (i+1) % 16; j < 16; ++j) {
+					printf("   ");
+				}
+				printf("|  %s \n", ascii);
+			}
+		}
+	}
+}
+#endif
+
 static void parse_sw(struct perf_reader *reader, void *data, int size) {
   uint8_t *ptr = data;
   struct perf_event_header *header = (void *)data;
+
+  // struct {
+  //     struct perf_event_header header;
+  //     u32    size;               /* if PERF_SAMPLE_RAW */
+  //     char   data[size];         /* if PERF_SAMPLE_RAW */
+  //     u64    abi;                /* if PERF_SAMPLE_REGS_USER */
+  //     u64    regs[weight(mask)]; /* if PERF_SAMPLE_REGS_USER */
+  //     u64    size;               /* if PERF_SAMPLE_STACK_USER */
+  //     char   data[size];         /* if PERF_SAMPLE_STACK_USER */
+  //     u64    dyn_size;           /* if PERF_SAMPLE_STACK_USER && size != 0 */
+  // };
+
+  // enum perf_sample_regs_abi {
+  //   PERF_SAMPLE_REGS_ABI_NONE = 0,
+  //   PERF_SAMPLE_REGS_ABI_32 = 1,
+  //   PERF_SAMPLE_REGS_ABI_64 = 2,
+  // };
 
   struct {
       uint32_t size;
@@ -134,6 +174,23 @@ static void parse_sw(struct perf_reader *reader, void *data, int size) {
   if (ptr > (uint8_t *)data + size) {
     fprintf(stderr, "%s: corrupt raw sample\n", __FUNCTION__);
     return;
+  }
+
+  if (reader->regs_cnt > 0) {
+      ptr += 8 * (1 + reader->regs_cnt);
+  }
+
+  if (reader->have_stack) {
+    // calc ptr
+    struct {
+        uint64_t size;
+        uint8_t data[0];
+    } *x = (void *)ptr;
+
+    //DumpHex(ptr, 512);
+    // size + data + dyn_size
+    ptr += 8 + x->size + 8;
+	//printf("event data: %p size: %u, stack size: %llx, %llu, ptr: %p\n", data, size, x->size, x->size, ptr);
   }
 
   // sanity check

@@ -141,6 +141,8 @@ class bcc_perf_buffer_opts(ct.Structure):
         ('pid', ct.c_int),
         ('cpu', ct.c_int),
         ('wakeup_events', ct.c_int),
+        ('stack_user', ct.c_uint),
+        ('regs_user', ct.c_uint64),
     ]
 
 lib.bpf_open_perf_buffer_opts.restype = ct.c_void_p

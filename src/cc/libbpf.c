@@ -99,6 +99,21 @@
 #define BPF_FS_MAGIC		0xcafe4a11
 #endif
 
+#define hweight8(w)     \
+            ((unsigned int)         \
+                         ((!!((w) & (1ULL << 0))) + \
+                                          (!!((w) & (1ULL << 1))) + \
+                                          (!!((w) & (1ULL << 2))) + \
+                                          (!!((w) & (1ULL << 3))) + \
+                                          (!!((w) & (1ULL << 4))) + \
+                                          (!!((w) & (1ULL << 5))) + \
+                                          (!!((w) & (1ULL << 6))) + \
+                                          (!!((w) & (1ULL << 7)))))
+
+#define hweight16(w) (hweight8(w)  + hweight8((w)  >> 8 ))
+#define hweight32(w) (hweight16(w) + hweight16((w) >> 16))
+#define hweight64(w) (hweight32(w) + hweight32((w) >> 32))
+
 struct bpf_helper {
   char *name;
   char *required_version;
@@ -1445,6 +1460,24 @@ void * bpf_open_perf_buffer_opts(perf_reader_raw_cb raw_cb,
   attr.sample_type = PERF_SAMPLE_RAW;
   attr.sample_period = 1;
   attr.wakeup_events = opts->wakeup_events;
+
+  if (opts->regs_user > 0) {
+    attr.sample_regs_user = opts->regs_user;
+    attr.sample_type |= PERF_SAMPLE_REGS_USER;
+    attr.size = sizeof(struct perf_event_attr);
+    reader->regs_cnt = hweight64(opts->regs_user);
+  }
+  if (opts->stack_user > 0) {
+    attr.sample_type |= PERF_SAMPLE_STACK_USER;
+    attr.sample_stack_user = opts->stack_user;
+    if (attr.sample_stack_user > (1 << 16)) { // __u16 sample size limit
+        attr.sample_stack_user = 1<<16;
+    }
+
+    attr.size = sizeof(struct perf_event_attr);
+    reader->have_stack = true;
+  }
+
   pfd = syscall(__NR_perf_event_open, &attr, pid, cpu, -1, PERF_FLAG_FD_CLOEXEC);
   if (pfd < 0) {
     fprintf(stderr, "perf_event_open: %s\n", strerror(errno));
